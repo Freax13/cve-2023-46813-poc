@@ -1,0 +1,140 @@
+From 30db5ed0cde1508092d182e08d511b1d1affa274 Mon Sep 17 00:00:00 2001
+From: Tom Dohrmann <erbse.13@gmx.de>
+Date: Mon, 29 May 2023 19:28:55 +0200
+Subject: [PATCH] add attack command
+
+This command issues the KVM_ATTACK ioctl. For some reason this doesn't
+work reliably, so I usually spam the command a couple of times until it
+works.
+---
+ accel/kvm/kvm-all.c       |  3 ++-
+ hmp-commands.hx           | 13 +++++++++++++
+ include/hw/core/cpu.h     |  2 ++
+ include/monitor/hmp.h     |  1 +
+ linux-headers/linux/kvm.h |  2 ++
+ monitor/hmp-cmds.c        |  8 ++++++++
+ target/i386/kvm/kvm.c     |  8 ++++++++
+ 7 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index d23851445c..c72298e963 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -788,7 +788,8 @@ static void do_kvm_cpu_synchronize_kick(CPUState *cpu, run_on_cpu_data arg)
+  * guarantee that every vcpu has been kicked and at least returned to
+  * userspace once.
+  */
+-static void kvm_cpu_synchronize_kick_all(void)
++void kvm_cpu_synchronize_kick_all(void);
++void kvm_cpu_synchronize_kick_all(void)
+ {
+     CPUState *cpu;
+ 
+diff --git a/hmp-commands.hx b/hmp-commands.hx
+index 673e39a697..a8fc35f3ae 100644
+--- a/hmp-commands.hx
++++ b/hmp-commands.hx
+@@ -431,6 +431,19 @@ SRST
+   Wakeup guest from suspend.
+ ERST
+ 
++    {
++        .name       = "attack",
++        .args_type  = "",
++        .params     = "",
++        .help       = "attack guest",
++        .cmd        = hmp_attack,
++    },
++
++SRST
++``attack``
++  Wakeup guest from suspend.
++ERST
++
+     {
+         .name       = "gdbserver",
+         .args_type  = "device:s?",
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index 8830546121..3968410334 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -443,6 +443,8 @@ struct CPUState {
+ 
+     /* track IOMMUs whose translations we've cached in the TCG TLB */
+     GArray *iommu_notifiers;
++
++    int attacked;
+ };
+ 
+ typedef QTAILQ_HEAD(CPUTailQ, CPUState) CPUTailQ;
+diff --git a/include/monitor/hmp.h b/include/monitor/hmp.h
+index dfbc0c9a2f..47954feeca 100644
+--- a/include/monitor/hmp.h
++++ b/include/monitor/hmp.h
+@@ -54,6 +54,7 @@ void hmp_ringbuf_write(Monitor *mon, const QDict *qdict);
+ void hmp_ringbuf_read(Monitor *mon, const QDict *qdict);
+ void hmp_cont(Monitor *mon, const QDict *qdict);
+ void hmp_system_wakeup(Monitor *mon, const QDict *qdict);
++void hmp_attack(Monitor *mon, const QDict *qdict);
+ void hmp_nmi(Monitor *mon, const QDict *qdict);
+ void hmp_set_link(Monitor *mon, const QDict *qdict);
+ void hmp_balloon(Monitor *mon, const QDict *qdict);
+diff --git a/linux-headers/linux/kvm.h b/linux-headers/linux/kvm.h
+index 67411a603c..4d7ae4036e 100644
+--- a/linux-headers/linux/kvm.h
++++ b/linux-headers/linux/kvm.h
+@@ -2302,6 +2302,8 @@ struct kvm_stats_desc {
+ /* Available with KVM_CAP_S390_ZPCI_OP */
+ #define KVM_S390_ZPCI_OP         _IOW(KVMIO,  0xd1, struct kvm_s390_zpci_op)
+ 
++#define KVM_ATTACK              _IO(KVMIO,  0xd4)
++
+ struct kvm_s390_zpci_op {
+ 	/* in */
+ 	__u32 fh;               /* target device */
+diff --git a/monitor/hmp-cmds.c b/monitor/hmp-cmds.c
+index 01b789a79e..d165f7e855 100644
+--- a/monitor/hmp-cmds.c
++++ b/monitor/hmp-cmds.c
+@@ -1034,6 +1034,14 @@ void hmp_system_wakeup(Monitor *mon, const QDict *qdict)
+     qmp_system_wakeup(&err);
+     hmp_handle_error(mon, err);
+ }
++    
++extern int global_attacked;
++void kvm_cpu_synchronize_kick_all(void);
++
++void hmp_attack(Monitor *mon, const QDict *qdict) {
++    global_attacked++;
++    kvm_cpu_synchronize_kick_all();
++}
+ 
+ void hmp_nmi(Monitor *mon, const QDict *qdict)
+ {
+diff --git a/target/i386/kvm/kvm.c b/target/i386/kvm/kvm.c
+index 133b5df2de..cd2022aea3 100644
+--- a/target/i386/kvm/kvm.c
++++ b/target/i386/kvm/kvm.c
+@@ -4921,11 +4921,19 @@ MemTxAttrs kvm_arch_post_run(CPUState *cpu, struct kvm_run *run)
+     return cpu_get_mem_attrs(env);
+ }
+ 
++int global_attacked = 0;
++
+ int kvm_arch_process_async_events(CPUState *cs)
+ {
+     X86CPU *cpu = X86_CPU(cs);
+     CPUX86State *env = &cpu->env;
+ 
++    if (cs->attacked != global_attacked) {
++        cs->attacked = global_attacked;
++        int ret = kvm_vcpu_ioctl(cs, KVM_ATTACK);
++        printf("ret: %x\n", ret);
++    }
++
+     if (cs->interrupt_request & CPU_INTERRUPT_MCE) {
+         /* We must not raise CPU_INTERRUPT_MCE if it's not supported. */
+         assert(env->mcg_cap);
+-- 
+2.34.1
+

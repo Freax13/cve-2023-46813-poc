@@ -1,0 +1,112 @@
+From a75d568b0c07e925da5b19f225fbb0bec8f8ee98 Mon Sep 17 00:00:00 2001
+From: Tom Dohrmann <erbse.13@gmx.de>
+Date: Mon, 29 May 2023 19:22:17 +0200
+Subject: [PATCH] add KVM_ATTACK ioctl
+
+This patch adds an ioctl to enable attack mode. Once attack mode is
+enabled, the nested page tables as reset and GFN 0x1f8b0c is henceforth
+treated as MMIO. The GFN was chosen at random. For some reason this
+doesn't work reliably for me, so I usually just spam the `attack`
+command in qemu until it works.
+---
+ arch/x86/kvm/mmu/mmu.c     | 8 ++++++--
+ arch/x86/kvm/mmu/tdp_mmu.c | 4 +++-
+ arch/x86/kvm/x86.c         | 6 ++++++
+ include/linux/kvm_host.h   | 2 ++
+ include/uapi/linux/kvm.h   | 2 ++
+ 5 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
+index d7847af3e177..ad20de106973 100644
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -2853,10 +2853,12 @@ static int mmu_set_spte(struct kvm_vcpu *vcpu, struct kvm_memory_slot *slot,
+ 	bool prefetch = !fault || fault->prefetch;
+ 	bool write_fault = fault && fault->write;
+ 
++	bool should_attack = vcpu->attacked && gfn == 0x1f8b0c;
++
+ 	pgprintk("%s: spte %llx write_fault %d gfn %llx\n", __func__,
+ 		 *sptep, write_fault, gfn);
+ 
+-	if (unlikely(is_noslot_pfn(pfn))) {
++	if (unlikely(is_noslot_pfn(pfn)) || should_attack) {
+ 		vcpu->stat.pf_mmio_spte_created++;
+ 		mark_mmio_spte(vcpu, sptep, gfn, pte_access);
+ 		return RET_PF_EMULATE;
+@@ -4682,7 +4684,9 @@ static unsigned long get_cr3(struct kvm_vcpu *vcpu)
+ static bool sync_mmio_spte(struct kvm_vcpu *vcpu, u64 *sptep, gfn_t gfn,
+ 			   unsigned int access)
+ {
+-	if (unlikely(is_mmio_spte(*sptep))) {
++	bool should_attack = vcpu->attacked && gfn == 0x1f8b0c;
++
++	if (unlikely(is_mmio_spte(*sptep)) || should_attack) {
+ 		if (gfn != get_mmio_spte_gfn(*sptep)) {
+ 			mmu_spte_clear_no_track(sptep);
+ 			return true;
+diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
+index 59f47b51784d..8286bc42de8e 100644
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -1063,11 +1063,13 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,
+ 	u64 new_spte;
+ 	int ret = RET_PF_FIXED;
+ 	bool wrprot = false;
++	bool should_attack = vcpu->attacked && iter->gfn == 0x1f8b0c;
+ 
+ 	if (WARN_ON_ONCE(sp->role.level != fault->goal_level))
+ 		return RET_PF_RETRY;
+ 
+-	if (unlikely(!fault->slot))
++
++	if (unlikely(!fault->slot) || should_attack)
+ 		new_spte = make_mmio_spte(vcpu, iter->gfn, ACC_ALL);
+ 	else
+ 		wrprot = make_spte(vcpu, sp, fault->slot, ACC_ALL, iter->gfn,
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 9872217e3a06..cf0dce0fce2e 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -5978,6 +5978,12 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 	case KVM_SET_DEVICE_ATTR:
+ 		r = kvm_vcpu_ioctl_device_attr(vcpu, ioctl, argp);
+ 		break;
++	case KVM_ATTACK: {
++		pr_info("ATTACK!");
++		kvm_mmu_reset_context(vcpu);
++		vcpu->attacked = true;
++		break;
++	}
+ 	default:
+ 		r = -EINVAL;
+ 	}
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 57d56cd09a61..da4c85cee714 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -391,6 +391,8 @@ struct kvm_vcpu {
+ 	 */
+ 	struct kvm_memory_slot *last_used_slot;
+ 	u64 last_used_slot_gen;
++
++	bool attacked;
+ };
+ 
+ /*
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index cc62feba16ee..0c49c7194cc9 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -2336,6 +2336,8 @@ struct kvm_s390_zpci_op {
+ #define KVM_GET_SUPPORTED_MEMORY_ATTRIBUTES    _IOR(KVMIO,  0xd2, __u64)
+ #define KVM_SET_MEMORY_ATTRIBUTES              _IOWR(KVMIO,  0xd3, struct kvm_memory_attributes)
+ 
++#define KVM_ATTACK              _IO(KVMIO,  0xd4)
++
+ struct kvm_memory_attributes {
+ 	__u64 address;
+ 	__u64 size;
+-- 
+2.34.1
+
