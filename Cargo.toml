@@ -1,0 +1,12 @@
+[package]
+name = "poc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+bytemuck = "1.13.1"
+libc = "0.2.144"
+nix = "0.26.2"
